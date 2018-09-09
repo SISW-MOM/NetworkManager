@@ -15,6 +15,7 @@
 #include <net/if.h>
 
 #include "nm-errno.h"
+#include "nm-str-buf.h"
 
 /*****************************************************************************/
 
@@ -4285,4 +4286,69 @@ nm_utils_ifname_valid (const char* name,
 	}
 
 	g_return_val_if_reached (FALSE);
+}
+
+/*****************************************************************************/
+
+static inline void
+_str_buf_expand_exact (NMStrBuf *strbuf,
+                       gsize new_allocated_exact)
+{
+	_nm_str_buf_assert (strbuf);
+
+	/* this only supports strictly growing the buffer. */
+	nm_assert (new_allocated_exact > strbuf->_allocated);
+
+	strbuf->_str = nm_secret_mem_realloc (strbuf->_str, strbuf->_do_bzero_mem, strbuf->_allocated, new_allocated_exact);
+	strbuf->_allocated = new_allocated_exact;
+}
+
+void
+_nm_str_buf_expand_exact (NMStrBuf *strbuf,
+                          gsize new_allocated_exact)
+{
+	_str_buf_expand_exact (strbuf, new_allocated_exact);
+}
+
+void
+_nm_str_buf_expand_grow (NMStrBuf *strbuf,
+                         gsize new_allocated_lower_limit)
+{
+	_nm_str_buf_assert (strbuf);
+
+	/* this only supports strictly growing the buffer. */
+	nm_assert (new_allocated_lower_limit > strbuf->_allocated);
+
+	_str_buf_expand_exact (strbuf,
+	                       nm_utils_get_next_realloc_size (!strbuf->_do_bzero_mem,
+	                                                       new_allocated_lower_limit));
+}
+
+void
+nm_str_buf_append_printf (NMStrBuf *strbuf,
+                          const char *format,
+                          ...)
+{
+	va_list args;
+	gsize len;
+	int l;
+
+	_nm_str_buf_assert (strbuf);
+
+	va_start (args, format);
+	len = g_printf_string_upper_bound (format, args);
+	va_end (args);
+
+	nm_str_buf_maybe_expand (strbuf, len);
+
+	va_start (args, format);
+	l = g_vsnprintf (&strbuf->_str[strbuf->_len], len, format, args);
+	va_end (args);
+
+	nm_assert (l >= 0);
+	nm_assert (strlen (&strbuf->_str[strbuf->_len]) == (gsize) l);
+	nm_assert ((gsize) l < len);
+
+	if (l > 0)
+		strbuf->_len += (gsize) l;
 }
