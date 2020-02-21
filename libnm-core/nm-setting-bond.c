@@ -440,19 +440,6 @@ nm_setting_bond_add_option (NMSettingBond *setting,
 	nm_clear_g_free (&priv->options_idx_cache);
 	g_hash_table_insert (priv->options, g_strdup (name), g_strdup (value));
 
-	if (nm_streq (name, NM_SETTING_BOND_OPTION_MIIMON)) {
-		if (!nm_streq (value, "0")) {
-			g_hash_table_remove (priv->options, NM_SETTING_BOND_OPTION_ARP_INTERVAL);
-			g_hash_table_remove (priv->options, NM_SETTING_BOND_OPTION_ARP_IP_TARGET);
-		}
-	} else if (nm_streq (name, NM_SETTING_BOND_OPTION_ARP_INTERVAL)) {
-		if (!nm_streq  (value, "0")) {
-			g_hash_table_remove (priv->options, NM_SETTING_BOND_OPTION_MIIMON);
-			g_hash_table_remove (priv->options, NM_SETTING_BOND_OPTION_DOWNDELAY);
-			g_hash_table_remove (priv->options, NM_SETTING_BOND_OPTION_UPDELAY);
-		}
-	}
-
 	_notify (setting, PROP_OPTIONS);
 
 	return TRUE;
@@ -605,15 +592,72 @@ _nm_setting_bond_option_supported (const char *option, NMBondMode mode)
 	return !NM_FLAGS_ANY (_bond_option_unsupp_mode (option), BIT (mode));
 }
 
-const char*
-bond_get_option_or_default (NMSettingBond *self,
+static gboolean
+bond_option_is_set (NMSettingBond *self,
+                    const char *option)
+{
+	return g_hash_table_lookup (NM_SETTING_BOND_GET_PRIVATE (self)->options, option) != NULL;
+}
+
+static const char*
+_bond_get_option_or_default (NMSettingBond *self,
                             const char *option)
 {
 	const char *value;
 
 	value = g_hash_table_lookup (NM_SETTING_BOND_GET_PRIVATE (self)->options, option);
 	if (!value)
-		return nm_setting_bond_get_option_default (self, option);
+		value = nm_setting_bond_get_option_default (self, option);
+	return value;
+}
+
+const char*
+_nm_setting_bond_get_option_or_default (NMSettingBond *self,
+                                        const char *option)
+{
+	const char *arp_interval_str;
+	const char *mode_str;
+	const char *value;
+	gint64 arp_interval;
+	NMBondMode mode;
+
+	g_return_val_if_fail (option, NULL);
+
+	mode_str = _bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_MODE);
+	mode = _nm_setting_bond_mode_from_string (mode_str);
+	g_return_val_if_fail (mode != NM_BOND_MODE_UNKNOWN, NULL);
+
+	if (!_nm_setting_bond_option_supported (option, mode)) {
+		return NULL;
+	}
+
+	/* Apply custom NetworkManager policies here */
+	if (NM_IN_STRSET (option,
+	                  NM_SETTING_BOND_OPTION_UPDELAY,
+	                  NM_SETTING_BOND_OPTION_DOWNDELAY,
+	                  NM_SETTING_BOND_OPTION_MIIMON)) {
+		/* if arp_interval is explicitly set and miimon is not, then disable miimon
+		 * (and related updelay and downdelay) as recommended by the kernel docs */
+		arp_interval_str = _bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_ARP_INTERVAL);
+		arp_interval = _nm_utils_ascii_str_to_int64 (arp_interval_str, 10, 0, G_MAXINT, 0);
+
+		if (!arp_interval || bond_option_is_set (self, NM_SETTING_BOND_OPTION_MIIMON)) {
+			value = _bond_get_option_or_default (self, option);
+		} else {
+			value = NULL;
+		}
+	} else if (NM_IN_STRSET (option,
+	                         NM_SETTING_BOND_OPTION_NUM_GRAT_ARP,
+	                         NM_SETTING_BOND_OPTION_NUM_UNSOL_NA)) {
+		/* just get one of the 2, at kernel level they're the same bond option */
+		if (bond_option_is_set (self, NM_SETTING_BOND_OPTION_NUM_GRAT_ARP)) {
+			value = _bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_NUM_GRAT_ARP);
+		} else {
+			value = _bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_NUM_UNSOL_NA);
+		}
+	} else {
+		value = _bond_get_option_or_default (self, option);
+	}
 
 	return value;
 }
@@ -650,17 +694,29 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 				             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 				             _("invalid option '%s' or its value '%s'"),
 				             n->name, n->value_str);
-				g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+				g_prefix_error (error,
+				                "%s.%s: ",
+				                NM_SETTING_BOND_SETTING_NAME,
+				                NM_SETTING_BOND_OPTIONS);
 				return FALSE;
 			}
 		}
 	}
 
-	miimon = _atoi (bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_MIIMON));
-	arp_interval = _atoi (bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_ARP_INTERVAL));
-	num_grat_arp = _atoi (bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_NUM_GRAT_ARP));
-	num_unsol_na = _atoi (bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_NUM_UNSOL_NA));
+	miimon = _atoi (_bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_MIIMON));
+	arp_interval = _atoi (_bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_ARP_INTERVAL));
+	num_grat_arp = _atoi (_bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_NUM_GRAT_ARP));
+	num_unsol_na = _atoi (_bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_NUM_UNSOL_NA));
 
+	/* Option restrictions:
+	 *
+	 * arp_interval conflicts [ alb, tlb ]
+	 * arp_interval needs arp_ip_target
+	 * arp_validate does not work with [ BOND_MODE_8023AD, BOND_MODE_TLB, BOND_MODE_ALB ]
+	 * downdelay needs miimon
+	 * updelay needs miimon
+	 * primary needs [ active-backup, tlb, alb ]
+	 */
 
 	/* Verify bond mode */
 	mode_orig = g_hash_table_lookup (priv->options, NM_SETTING_BOND_OPTION_MODE);
@@ -679,8 +735,12 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 		             NM_CONNECTION_ERROR,
 		             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 		             _("'%s' is not a valid value for '%s'"),
-		             mode_orig, NM_SETTING_BOND_OPTION_MODE);
-		g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+		             mode_orig,
+		             NM_SETTING_BOND_OPTION_MODE);
+		g_prefix_error (error,
+		                "%s.%s: ",
+		                NM_SETTING_BOND_SETTING_NAME,
+		                NM_SETTING_BOND_OPTIONS);
 		return FALSE;
 	}
 	mode_new = nm_utils_bond_mode_int_to_string (mode);
@@ -693,8 +753,13 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR,
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s=%s' is incompatible with '%s > 0'"),
-			             NM_SETTING_BOND_OPTION_MODE, mode_new, NM_SETTING_BOND_OPTION_ARP_INTERVAL);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			             NM_SETTING_BOND_OPTION_MODE,
+			             mode_new,
+			             NM_SETTING_BOND_OPTION_ARP_INTERVAL);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			return FALSE;
 		}
 	}
@@ -709,21 +774,22 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' is not valid for the '%s' option: %s"),
 			             primary, NM_SETTING_BOND_OPTION_PRIMARY, tmp_error->message);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			g_error_free (tmp_error);
 			return FALSE;
 		}
-	} else {
-		if (primary) {
-			g_set_error (error,
-			             NM_CONNECTION_ERROR,
-			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
-			             _("'%s' option is only valid for '%s=%s'"),
-			             NM_SETTING_BOND_OPTION_PRIMARY,
-			             NM_SETTING_BOND_OPTION_MODE, "active-backup");
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
-			return FALSE;
-		}
+	} else if (primary) {
+		g_set_error (error,
+		             NM_CONNECTION_ERROR,
+		             NM_CONNECTION_ERROR_INVALID_PROPERTY,
+		             _("'%s' option is only valid for '%s=%s'"),
+		             NM_SETTING_BOND_OPTION_PRIMARY,
+		             NM_SETTING_BOND_OPTION_MODE, "active-backup");
+		g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+		return FALSE;
 	}
 
 	if (   connection
@@ -734,34 +800,38 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s=%s' is not a valid configuration for '%s'"),
 			             NM_SETTING_BOND_OPTION_MODE, mode_new, NM_SETTING_INFINIBAND_SETTING_NAME);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
 			return FALSE;
 		}
 	}
 
 	if (miimon == 0) {
-		gpointer delayopt;
-
 		/* updelay and downdelay need miimon to be enabled to be valid */
-		delayopt = g_hash_table_lookup (priv->options, NM_SETTING_BOND_OPTION_UPDELAY);
-		if (delayopt && _atoi (delayopt) > 0) {
+		if (_atoi (_bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_UPDELAY))) {
 			g_set_error (error,
 			             NM_CONNECTION_ERROR,
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' option requires '%s' option to be enabled"),
 			             NM_SETTING_BOND_OPTION_UPDELAY, NM_SETTING_BOND_OPTION_MIIMON);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			return FALSE;
 		}
 
-		delayopt = g_hash_table_lookup (priv->options, NM_SETTING_BOND_OPTION_DOWNDELAY);
-		if (delayopt && _atoi (delayopt) > 0) {
+		if (_atoi (_bond_get_option_or_default (self, NM_SETTING_BOND_OPTION_DOWNDELAY))) {
 			g_set_error (error,
 			             NM_CONNECTION_ERROR,
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' option requires '%s' option to be enabled"),
 			             NM_SETTING_BOND_OPTION_DOWNDELAY, NM_SETTING_BOND_OPTION_MIIMON);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			return FALSE;
 		}
 	}
@@ -779,8 +849,12 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR,
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' option requires '%s' option to be set"),
-			             NM_SETTING_BOND_OPTION_ARP_INTERVAL, NM_SETTING_BOND_OPTION_ARP_IP_TARGET);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			             NM_SETTING_BOND_OPTION_ARP_INTERVAL,
+			             NM_SETTING_BOND_OPTION_ARP_IP_TARGET);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			return FALSE;
 		}
 
@@ -791,7 +865,9 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' option is empty"),
 			             NM_SETTING_BOND_OPTION_ARP_IP_TARGET);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			g_prefix_error (error, "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			g_strfreev (addrs);
 			return FALSE;
 		}
@@ -802,8 +878,12 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 				             NM_CONNECTION_ERROR,
 				             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 				             _("'%s' is not a valid IPv4 address for '%s' option"),
-				             NM_SETTING_BOND_OPTION_ARP_IP_TARGET, addrs[i]);
-				g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+				             NM_SETTING_BOND_OPTION_ARP_IP_TARGET,
+				             addrs[i]);
+				g_prefix_error (error,
+				                "%s.%s: ",
+				                NM_SETTING_BOND_SETTING_NAME,
+				                NM_SETTING_BOND_OPTIONS);
 				g_strfreev (addrs);
 				return FALSE;
 			}
@@ -815,8 +895,11 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR,
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' option requires '%s' option to be set"),
-			             NM_SETTING_BOND_OPTION_ARP_IP_TARGET, NM_SETTING_BOND_OPTION_ARP_INTERVAL);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			             NM_SETTING_BOND_OPTION_ARP_IP_TARGET,
+			             NM_SETTING_BOND_OPTION_ARP_INTERVAL);
+			g_prefix_error (error, "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			return FALSE;
 		}
 	}
@@ -834,8 +917,8 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 		return FALSE;
 	}
 
-	if (   g_hash_table_lookup (priv->options, NM_SETTING_BOND_OPTION_NUM_GRAT_ARP)
-	    && g_hash_table_lookup (priv->options, NM_SETTING_BOND_OPTION_NUM_UNSOL_NA)
+	if (   bond_option_is_set (self, NM_SETTING_BOND_OPTION_NUM_GRAT_ARP)
+	    && bond_option_is_set (self, NM_SETTING_BOND_OPTION_NUM_UNSOL_NA)
 	    && num_grat_arp != num_unsol_na) {
 		g_set_error (error,
 		             NM_CONNECTION_ERROR,
@@ -872,7 +955,10 @@ verify (NMSetting *setting, NMConnection *connection, GError **error)
 			             NM_CONNECTION_ERROR_INVALID_PROPERTY,
 			             _("'%s' option is not valid with mode '%s'"),
 			             n->name, mode_new);
-			g_prefix_error (error, "%s.%s: ", NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BOND_OPTIONS);
+			g_prefix_error (error,
+			                "%s.%s: ",
+			                NM_SETTING_BOND_SETTING_NAME,
+			                NM_SETTING_BOND_OPTIONS);
 			return NM_SETTING_VERIFY_NORMALIZABLE;
 		}
 	}
