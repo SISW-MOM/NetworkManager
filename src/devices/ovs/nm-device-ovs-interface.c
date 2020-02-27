@@ -21,6 +21,7 @@ _LOG_DECLARE_SELF(NMDeviceOvsInterface);
 
 typedef struct {
 	bool waiting_for_interface:1;
+	guint32 pending_mtu;
 } NMDeviceOvsInterfacePrivate;
 
 struct _NMDeviceOvsInterface {
@@ -155,6 +156,59 @@ deactivate (NMDevice *device)
 	NMDeviceOvsInterfacePrivate *priv = NM_DEVICE_OVS_INTERFACE_GET_PRIVATE (self);
 
 	priv->waiting_for_interface = FALSE;
+}
+
+static void
+set_platform_mtu_cb (GError *error, gpointer user_data)
+{
+	NMDevice *device = user_data;
+	NMDeviceOvsInterface *self = NM_DEVICE_OVS_INTERFACE (device);
+	NMDeviceOvsInterfacePrivate *priv = NM_DEVICE_OVS_INTERFACE_GET_PRIVATE (self);
+
+	if (   error
+	    && !g_error_matches (error, NM_UTILS_ERROR, NM_UTILS_ERROR_CANCELLED_DISPOSING)) {
+		nm_log_warn (LOGD_DEVICE, "could not change mtu of '%s': %s",
+		             nm_device_get_iface (device), error->message);
+	}
+
+	g_object_unref (device);
+}
+
+static gboolean
+set_platform_mtu (NMDevice *device, guint32 mtu)
+{
+	NMDeviceOvsInterface *self = NM_DEVICE_OVS_INTERFACE (device);
+	NMDeviceOvsInterfacePrivate *priv = NM_DEVICE_OVS_INTERFACE_GET_PRIVATE (self);
+
+	nm_assert (mtu != 0);
+
+	if (!_is_internal_interface (device))
+		return TRUE;
+
+	if (mtu == priv->pending_mtu)
+		return TRUE;
+
+	/*
+	 * We fire the request and return immediately. Ideally we should wait
+	 * the response from ovsdb, however that wouldn't be enough as it would
+	 * only ensure that the mtu was written into the ovsdb; we should also
+	 * monitor the kernel link for a change that could never happen if
+	 * ovs-switchd fails to apply the MTU. Also, making set_platform_mtu()
+	 * asynchrous would require that MTU operations in NMDevice become
+	 * asynchronous as well, which is complicated.
+	 *
+	 * So, don't bother. During the activation we already create the
+	 * interface with the right MTU from configuration, so this function is
+	 * needed only during a Reapply() call, which doesn't guarantee the
+	 * device state was reapplied on return.
+	 */
+	nm_ovsdb_set_interface_mtu (nm_ovsdb_get (),
+	                            nm_device_get_ip_iface (device),
+	                            mtu, set_platform_mtu_cb,
+	                            g_object_ref (device));
+	priv->pending_mtu = mtu;
+
+	return TRUE;
 }
 
 typedef struct {
@@ -351,4 +405,6 @@ nm_device_ovs_interface_class_init (NMDeviceOvsInterfaceClass *klass)
 	device_class->link_changed = link_changed;
 	device_class->act_stage3_ip_config_start = act_stage3_ip_config_start;
 	device_class->can_unmanaged_external_down = can_unmanaged_external_down;
+	device_class->set_platform_mtu = set_platform_mtu;
+	device_class->get_configured_mtu = nm_device_get_configured_mtu_for_wired;
 }
