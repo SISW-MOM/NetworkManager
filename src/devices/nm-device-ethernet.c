@@ -1333,17 +1333,22 @@ act_stage2_config (NMDevice *device, NMDeviceStateReason *out_failure_reason)
 		security = nm_device_get_applied_setting (device, NM_TYPE_SETTING_802_1X);
 
 		if (security) {
-			/* FIXME: for now 802.1x is mutually exclusive with DCB */
+			NMActStageReturn ret;
+
 			if (!nm_device_has_carrier (NM_DEVICE (self))) {
 				_LOGD (LOGD_DEVICE | LOGD_ETHER, "delay supplicant initialization until carrier goes up");
-				priv->carrier_id = g_signal_connect (self,
-				                                     "notify::" NM_DEVICE_CARRIER,
-				                                     G_CALLBACK (carrier_changed),
-				                                     self);
+				if (!priv->carrier_id) {
+					priv->carrier_id = g_signal_connect (self,
+					                                     "notify::" NM_DEVICE_CARRIER,
+					                                     G_CALLBACK (carrier_changed),
+					                                     self);
+				}
 				return NM_ACT_STAGE_RETURN_POSTPONE;
 			}
 
-			return supplicant_check_secrets_needed (self, out_failure_reason);
+			ret = supplicant_check_secrets_needed (self, out_failure_reason);
+			if (ret != NM_ACT_STAGE_RETURN_SUCCESS)
+				return ret;
 		}
 	}
 
